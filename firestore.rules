@@ -1,0 +1,279 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net: Default deny everything
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- HELPER FUNCTIONS ---
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isOwnerEmail() {
+      return isSignedIn() &&
+        (request.auth.token.email == 'mmm3332012@gmail.com' ||
+         request.auth.token.email == 'mmmmm3332012@gmail.com');
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        isOwnerEmail() ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        (
+          exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'
+        )
+      );
+    }
+
+    function isVendor() {
+      return isSignedIn() && (
+        isAdmin() ||
+        (
+          exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'vendor'
+        )
+      );
+    }
+
+    // --- SCHEMA VALIDATOR HELPERS ---
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['id', 'name', 'email', 'role']) &&
+        data.id is string && data.id.size() <= 128 &&
+        data.name is string && data.name.size() <= 100 &&
+        data.email is string && data.email.size() <= 150 &&
+        data.role in ['client', 'vendor', 'admin'];
+    }
+
+    function isValidBooking(data) {
+      return data.keys().hasAll(['id', 'serviceId', 'clientName', 'clientPhone', 'totalPrice', 'status', 'paymentStatus']) &&
+        data.id is string && data.id.size() <= 128 &&
+        data.serviceId is string && data.serviceId.size() <= 128 &&
+        data.clientName is string && data.clientName.size() <= 100 &&
+        data.clientPhone is string && data.clientPhone.size() <= 30 &&
+        data.totalPrice is number &&
+        data.status in ['pending', 'accepted', 'rejected', 'paid', 'completed', 'cancelled'] &&
+        data.paymentStatus in ['paid_deposit', 'fully_paid', 'refunded', 'pending'];
+    }
+
+    function isValidVendorApp(data) {
+      return data.keys().hasAll(['id', 'userId', 'userName', 'userEmail', 'businessName', 'category', 'status']) &&
+        data.id is string && data.id.size() <= 128 &&
+        data.userId is string && data.userId.size() <= 128 &&
+        data.userName is string && data.userName.size() <= 100 &&
+        data.userEmail is string && data.userEmail.size() <= 150 &&
+        data.businessName is string && data.businessName.size() <= 200 &&
+        data.category is string && data.category.size() <= 50 &&
+        data.status in ['pending', 'approved', 'rejected'];
+    }
+
+    // --- COLLECTION RULES ---
+
+    // Admins Collection
+    match /admins/{adminUid} {
+      allow read, write: if isAdmin();
+    }
+
+    // Users Collection
+    match /users/{userId} {
+      allow get: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isSignedIn() &&
+        isValidId(userId) &&
+        isValidUser(incoming()) &&
+        incoming().id == userId &&
+        (incoming().role == 'client' || (incoming().role == 'admin' && isOwnerEmail()) || isAdmin());
+      allow update: if isSignedIn() &&
+        isValidId(userId) &&
+        isValidUser(incoming()) &&
+        (request.auth.uid == userId || isAdmin()) &&
+        (incoming().role == existing().role || isAdmin() || isOwnerEmail()) &&
+        incoming().id == existing().id &&
+        incoming().email == existing().email;
+      allow delete: if isAdmin();
+    }
+
+    // Services Collection
+    match /services/{serviceId} {
+      allow get, list: if true;
+      allow create: if isSignedIn() &&
+        isValidId(serviceId) &&
+        (isVendor() || isAdmin()) &&
+        incoming().vendorId == request.auth.uid;
+      allow update: if isSignedIn() &&
+        isValidId(serviceId) &&
+        (isAdmin() || (isVendor() && existing().vendorId == request.auth.uid && incoming().vendorId == existing().vendorId));
+      allow delete: if isSignedIn() &&
+        isValidId(serviceId) &&
+        (isAdmin() || (isVendor() && existing().vendorId == request.auth.uid));
+    }
+
+    // Bookings Collection
+    match /bookings/{bookingId} {
+      allow get: if isSignedIn() && (
+        isAdmin() ||
+        resource.data.clientId == request.auth.uid ||
+        resource.data.clientEmail == request.auth.token.email ||
+        (isVendor() && (
+          resource.data.vendorId == request.auth.uid ||
+          (exists(/databases/$(database)/documents/services/$(resource.data.serviceId)) &&
+           get(/databases/$(database)/documents/services/$(resource.data.serviceId)).data.vendorId == request.auth.uid)
+        ))
+      );
+      allow list: if isSignedIn() && (
+        isAdmin() ||
+        resource.data.clientId == request.auth.uid ||
+        resource.data.clientEmail == request.auth.token.email ||
+        (isVendor() && resource.data.vendorId == request.auth.uid)
+      );
+      allow create: if isSignedIn() &&
+        isValidId(bookingId) &&
+        isValidBooking(incoming()) &&
+        (incoming().clientId == request.auth.uid || incoming().clientEmail == request.auth.token.email || isAdmin());
+      allow update: if isSignedIn() &&
+        isValidId(bookingId) &&
+        isValidBooking(incoming()) && (
+          isAdmin() ||
+          (existing().clientId == request.auth.uid && incoming().clientId == existing().clientId && incoming().status == 'cancelled') ||
+          (isVendor() && (
+            existing().vendorId == request.auth.uid ||
+            (exists(/databases/$(database)/documents/services/$(existing().serviceId)) &&
+             get(/databases/$(database)/documents/services/$(existing().serviceId)).data.vendorId == request.auth.uid)
+          ) && incoming().clientId == existing().clientId && incoming().serviceId == existing().serviceId)
+        );
+      allow delete: if isAdmin();
+    }
+
+    // Vendor Applications Collection
+    match /vendor_applications/{appId} {
+      allow get: if isSignedIn() && (
+        resource.data.userId == request.auth.uid ||
+        resource.data.userEmail == request.auth.token.email ||
+        isAdmin()
+      );
+      allow list: if isSignedIn() && (
+        resource.data.userId == request.auth.uid ||
+        resource.data.userEmail == request.auth.token.email ||
+        isAdmin()
+      );
+      allow create: if isSignedIn() &&
+        isValidId(appId) &&
+        isValidVendorApp(incoming()) &&
+        (incoming().userId == request.auth.uid || incoming().userEmail == request.auth.token.email) &&
+        incoming().status == 'pending';
+      allow update: if isSignedIn() &&
+        isValidId(appId) &&
+        isValidVendorApp(incoming()) &&
+        isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // Guests Collection
+    match /guests/{guestId} {
+      allow get, list: if isSignedIn() && (
+        resource.data.clientId == request.auth.uid ||
+        resource.data.clientEmail == request.auth.token.email ||
+        isAdmin()
+      );
+      allow create: if isSignedIn() &&
+        isValidId(guestId) &&
+        (incoming().clientId == request.auth.uid || incoming().clientEmail == request.auth.token.email || isAdmin());
+      allow update, delete: if isSignedIn() &&
+        isValidId(guestId) && (
+          resource.data.clientId == request.auth.uid ||
+          resource.data.clientEmail == request.auth.token.email ||
+          isAdmin()
+        );
+    }
+
+    // Tasks Collection
+    match /tasks/{taskId} {
+      allow get, list: if isSignedIn() && (
+        resource.data.clientId == request.auth.uid ||
+        resource.data.clientEmail == request.auth.token.email ||
+        isAdmin()
+      );
+      allow create: if isSignedIn() &&
+        isValidId(taskId) &&
+        (incoming().clientId == request.auth.uid || incoming().clientEmail == request.auth.token.email || isAdmin());
+      allow update, delete: if isSignedIn() &&
+        isValidId(taskId) && (
+          resource.data.clientId == request.auth.uid ||
+          resource.data.clientEmail == request.auth.token.email ||
+          isAdmin()
+        );
+    }
+
+    // Budgets Collection
+    match /budgets/{budgetItemId} {
+      allow get, list: if isSignedIn() && (
+        resource.data.clientId == request.auth.uid ||
+        resource.data.clientEmail == request.auth.token.email ||
+        isAdmin()
+      );
+      allow create: if isSignedIn() &&
+        isValidId(budgetItemId) &&
+        (incoming().clientId == request.auth.uid || incoming().clientEmail == request.auth.token.email || isAdmin());
+      allow update, delete: if isSignedIn() &&
+        isValidId(budgetItemId) && (
+          resource.data.clientId == request.auth.uid ||
+          resource.data.clientEmail == request.auth.token.email ||
+          isAdmin()
+        );
+    }
+
+    // Music Custom Requests Collection
+    match /music_requests/{requestId} {
+      allow get, list: if isSignedIn() && (
+        resource.data.clientId == request.auth.uid ||
+        resource.data.clientEmail == request.auth.token.email ||
+        isVendor() ||
+        isAdmin()
+      );
+      allow create: if isSignedIn() &&
+        isValidId(requestId) &&
+        (incoming().clientId == request.auth.uid || incoming().clientEmail == request.auth.token.email || isAdmin());
+      allow update: if isSignedIn() &&
+        isValidId(requestId) && (
+          resource.data.clientId == request.auth.uid ||
+          isVendor() ||
+          isAdmin()
+        );
+      allow delete: if isAdmin();
+    }
+
+    // Service Reviews Collection
+    match /service_reviews/{reviewId} {
+      allow read: if true;
+      allow create: if isSignedIn() && isValidId(reviewId);
+      allow delete: if isSignedIn() && (
+        resource.data.clientEmail == request.auth.token.email ||
+        isAdmin()
+      );
+    }
+
+    // Promo Codes Collection
+    match /promo_codes/{codeId} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if isAdmin();
+    }
+  }
+}

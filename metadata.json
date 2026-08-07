@@ -1,0 +1,6 @@
+{
+  "name": "مناسباتي | Munasabati",
+  "description": "تطبيق إلكتروني متكامل لإدارة المناسبات والفعاليات، حجز القاعات، المصورين، الميكب آرتيست والموسيقى في القاهرة والجيزة والقليوبية مع الدفع الجزئي والمساعد الذكي والتقويم التفاعلي.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
